@@ -134,3 +134,19 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
+# Broker-style ledger
+ledger_df = pd.DataFrame(ledger)
+
+if not ledger_df.empty:
+    st.subheader("📒 Broker-Style Ledger")
+    st.dataframe(ledger_df.style.format({
+        "Entry Price 1": "{:.2f}", "Exit Price 1": "{:.2f}",
+        "Entry Price 2": "{:.2f}", "Exit Price 2": "{:.2f}",
+        "Qty1": "{:.0f}", "Qty2": "{:.0f}",
+        "P&L": "₹{:.2f}", "Cash After Trade": "₹{:.2f}"
+    }), use_container_width=True)
+
+    st.markdown(f"### 💼 Final Capital: ₹{round(current_cash, 2):,.2f}")
+else:
+    st.info("No trades executed yet within selected time range.")
+
