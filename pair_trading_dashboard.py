@@ -52,8 +52,8 @@ st.plotly_chart(fig, use_container_width=True)
 output = BytesIO()
 with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
     data.to_excel(writer, sheet_name="PairData")
-    writer.save()
-    processed_data = output.getvalue()
+
+processed_data = output.getvalue()
 
 st.download_button(
     label="📥 Download Data as Excel",
@@ -61,4 +61,6 @@ st.download_button(
     file_name=f"{stock1}_{stock2}_pair_data.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
+
 
