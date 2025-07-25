@@ -3,21 +3,22 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objs as go
+from scipy import stats
 from io import BytesIO
 
 st.set_page_config(layout="wide")
 st.title("📈 Custom Pair Trading Dashboard")
 
-# Sidebar inputs
-nifty100_stocks = ["HDFCBANK.NS", "INFY.NS", "RELIANCE.NS", "TCS.NS", "ITC.NS"]
-stock1 = st.sidebar.selectbox("Select Stock 1", options=nifty100_stocks, index=0)
-stock2 = st.sidebar.selectbox("Select Stock 2", options=nifty100_stocks, index=1)
+# Sidebar: stock selection and settings
+stock_options = ["HDFCBANK.NS", "INFY.NS", "RELIANCE.NS", "TCS.NS", "ICICIBANK.NS"]
+stock1 = st.sidebar.selectbox("Stock 1", stock_options, index=0)
+stock2 = st.sidebar.selectbox("Stock 2", stock_options, index=1)
+interval = st.sidebar.selectbox("Time Interval", ["1d", "1h", "30m", "15m", "5m"], index=0)
 start_date = st.sidebar.date_input("Start Date", pd.to_datetime("2024-01-01"))
 end_date = st.sidebar.date_input("End Date", pd.to_datetime("2024-07-01"))
-capital = st.sidebar.number_input("Starting Capital", value=100000)
-interval = st.sidebar.selectbox("Timeframe", options=["1d", "1h", "15m"], index=0)
+capital = st.sidebar.number_input("Starting Capital (₹)", value=100000)
 
-# Load Data
+# Load data
 @st.cache_data
 def load_data(stock1, stock2, start, end, interval):
     df1 = yf.download(stock1, start=start, end=end, interval=interval)["Close"]
@@ -25,18 +26,70 @@ def load_data(stock1, stock2, start, end, interval):
     df = pd.concat([df1, df2], axis=1)
     df.columns = [stock1, stock2]
     df.dropna(inplace=True)
-    df.index = df.index.tz_localize(None)  # Remove timezone for Excel
     return df
 
 data = load_data(stock1, stock2, start_date, end_date, interval)
+
+# Plot price chart
 st.subheader("📉 Price Chart")
 st.line_chart(data)
 
-# Spread and Z-Score
+# Z-score and spread
 data["Spread"] = data[stock1] - data[stock2]
 data["Z-Score"] = (data["Spread"] - data["Spread"].mean()) / data["Spread"].std()
 
-# Z-Score & Spread plot
+# Trade logic
+in_position = False
+entry_index = None
+ledger = []
+current_cash = capital
+
+for i in range(len(data)):
+    z = data["Z-Score"].iloc[i]
+    price1 = data[stock1].iloc[i]
+    price2 = data[stock2].iloc[i]
+    timestamp = data.index[i]
+
+    # Entry Condition
+    if not in_position and abs(z) > 1.5:
+        entry_index = i
+        entry_price1 = price1
+        entry_price2 = price2
+        direction = "Short 1, Long 2" if z > 1.5 else "Short 2, Long 1"
+        qty1 = qty2 = current_cash // (2 * max(entry_price1, entry_price2))
+        in_position = True
+
+    # Exit Condition
+    elif in_position and abs(z) < 0.1:
+        exit_price1 = price1
+        exit_price2 = price2
+        trade_date = data.index[i]
+
+        # Determine P&L based on trade direction
+        if direction == "Short 1, Long 2":
+            pnl = (entry_price1 - exit_price1) * qty1 + (exit_price2 - entry_price2) * qty2
+        else:
+            pnl = (entry_price2 - exit_price2) * qty2 + (exit_price1 - entry_price1) * qty1
+
+        # Update cash
+        current_cash += pnl - 100  # ₹50 cost per leg
+        ledger.append({
+            "Date": trade_date.replace(tzinfo=None),
+            "Direction": direction,
+            "Entry Price 1": entry_price1,
+            "Exit Price 1": exit_price1,
+            "Entry Price 2": entry_price2,
+            "Exit Price 2": exit_price2,
+            "Qty1": qty1,
+            "Qty2": qty2,
+            "P&L": pnl,
+            "Cash After Trade": current_cash
+        })
+
+        in_position = False
+        entry_index = None
+
+# Plot spread + z-score
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=data.index, y=data["Spread"], name="Spread"))
 fig.add_trace(go.Scatter(x=data.index, y=data["Z-Score"], name="Z-Score", yaxis="y2"))
@@ -47,92 +100,6 @@ fig.update_layout(
     legend=dict(x=0.01, y=0.99)
 )
 st.plotly_chart(fig, use_container_width=True)
-
-# Trading logic
-entry = None
-trades = []
-cash = capital
-position_open = False
-
-for i in range(1, len(data)):
-    z = data["Z-Score"].iloc[i]
-    prev_z = data["Z-Score"].iloc[i - 1]
-    date = data.index[i]
-    price1 = data[stock1].iloc[i]
-    price2 = data[stock2].iloc[i]
-
-    if not position_open:
-        if z > 1.5:
-            qty = cash // (price1 + price2)
-            entry = {
-                "type": "Short 1 / Long 2",
-                "entry_time": date,
-                "entry_z": z,
-                "entry_price_1": price1,
-                "entry_price_2": price2,
-                "qty": qty
-            }
-            position_open = True
-
-        elif z < -1.5:
-            qty = cash // (price1 + price2)
-            entry = {
-                "type": "Long 1 / Short 2",
-                "entry_time": date,
-                "entry_z": z,
-                "entry_price_1": price1,
-                "entry_price_2": price2,
-                "qty": qty
-            }
-            position_open = True
-
-    elif position_open and abs(z) < 0.1:
-        exit_price_1 = price1
-        exit_price_2 = price2
-
-        entry["exit_time"] = date
-        entry["exit_price_1"] = exit_price_1
-        entry["exit_price_2"] = exit_price_2
-        entry["exit_z"] = z
-
-        if entry["type"] == "Short 1 / Long 2":
-            pnl = (entry["entry_price_1"] - exit_price_1 + exit_price_2 - entry["entry_price_2"]) * entry["qty"]
-        else:
-            pnl = (exit_price_1 - entry["entry_price_1"] + entry["entry_price_2"] - exit_price_2) * entry["qty"]
-
-        entry["pnl"] = round(pnl, 2)
-        cash += pnl
-        trades.append(entry)
-        entry = None
-        position_open = False
-
-# Trade Ledger Display
-if trades:
-    trade_df = pd.DataFrame(trades)
-    st.subheader("📒 Trade P&L Ledger")
-    st.dataframe(trade_df)
-
-    total_pnl = trade_df["pnl"].sum()
-    st.metric("💰 Total Strategy P&L", f"₹ {total_pnl:.2f}")
-    st.metric("🏦 Final Capital", f"₹ {cash:.2f}")
-else:
-    st.info("No trades triggered for this pair in selected time period.")
-
-# Excel Export
-output = BytesIO()
-with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-    data.to_excel(writer, sheet_name="PriceData")
-    if trades:
-        trade_df.to_excel(writer, sheet_name="TradeLedger")
-    writer.close()
-    processed_data = output.getvalue()
-
-st.download_button(
-    label="📥 Download Excel Report",
-    data=processed_data,
-    file_name=f"{stock1}_{stock2}_Pair_Trading_Report.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
 
 # Broker-style ledger
 ledger_df = pd.DataFrame(ledger)
@@ -150,3 +117,19 @@ if not ledger_df.empty:
 else:
     st.info("No trades executed yet within selected time range.")
 
+# Excel download
+output = BytesIO()
+data.index = data.index.tz_localize(None)  # Remove timezone for Excel
+with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    data.to_excel(writer, sheet_name="Price + Z")
+    if not ledger_df.empty:
+        ledger_df.to_excel(writer, sheet_name="Trade Ledger", index=False)
+    writer.close()
+    processed_data = output.getvalue()
+
+st.download_button(
+    label="📥 Download Excel Report",
+    data=processed_data,
+    file_name=f"{stock1}_{stock2}_pair_trading_report.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
