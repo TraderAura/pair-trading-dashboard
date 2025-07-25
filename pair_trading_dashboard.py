@@ -116,7 +116,6 @@ with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
     data.to_excel(writer, sheet_name="Z-Score Data")
     if trades:
         trade_log.to_excel(writer, sheet_name="Trade Log", index=False)
-    writer.save()
     processed_data = output.getvalue()
 
 st.download_button(
