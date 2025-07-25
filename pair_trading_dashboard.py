@@ -35,6 +35,70 @@ st.line_chart(data)
 data["Spread"] = data[stock1] - data[stock2]
 data["Z-Score"] = (data["Spread"] - data["Spread"].mean()) / data["Spread"].std()
 
+# Initialize trading variables
+entry = None
+trades = []
+cash = capital
+position_open = False
+
+qty = 0
+
+for i in range(1, len(data)):
+    z = data["Z-Score"].iloc[i]
+    prev_z = data["Z-Score"].iloc[i - 1]
+
+    date = data.index[i]
+    price1 = data[stock1].iloc[i]
+    price2 = data[stock2].iloc[i]
+
+    # Entry condition
+    if not position_open:
+        if z > 1.5:
+            qty = cash // (price1 + price2)
+            entry = {
+                "type": "Short 1 / Long 2",
+                "entry_time": date,
+                "entry_z": z,
+                "entry_price_1": price1,
+                "entry_price_2": price2,
+                "qty": qty
+            }
+            position_open = True
+
+        elif z < -1.5:
+            qty = cash // (price1 + price2)
+            entry = {
+                "type": "Long 1 / Short 2",
+                "entry_time": date,
+                "entry_z": z,
+                "entry_price_1": price1,
+                "entry_price_2": price2,
+                "qty": qty
+            }
+            position_open = True
+
+    # Exit condition
+    elif position_open and abs(z) < 0.1:
+        exit_time = date
+        exit_price_1 = price1
+        exit_price_2 = price2
+        entry["exit_time"] = exit_time
+        entry["exit_price_1"] = exit_price_1
+        entry["exit_price_2"] = exit_price_2
+        entry["exit_z"] = z
+
+        if entry["type"] == "Short 1 / Long 2":
+            pnl = (entry["entry_price_1"] - exit_price_1 + exit_price_2 - entry["entry_price_2"]) * qty
+        else:
+            pnl = (exit_price_1 - entry["entry_price_1"] + entry["entry_price_2"] - exit_price_2) * qty
+
+        entry["pnl"] = round(pnl, 2)
+        cash += pnl
+        trades.append(entry)
+        position_open = False
+        entry = None
+
+
 # Plot Spread and Z-Score
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=data.index, y=data["Spread"], name="Spread"))
