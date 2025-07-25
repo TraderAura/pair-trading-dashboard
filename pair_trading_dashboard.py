@@ -99,6 +99,15 @@ if trades:
 else:
     st.info("No trades were generated for the selected period and stocks.")
 
+data.index = data.index.tz_localize(None)
+
+if trades:
+    for t in trades:
+        t["Entry Time"] = t["Entry Time"].tz_localize(None)
+        t["Exit Time"] = t["Exit Time"].tz_localize(None)
+    trade_df = pd.DataFrame(trades)
+
+
 # Excel Export
 output = BytesIO()
 with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
