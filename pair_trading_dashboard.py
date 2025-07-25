@@ -19,8 +19,8 @@ capital = st.sidebar.number_input("Starting Capital", value=100000)
 # Load Data
 @st.cache_data
 def load_data(stock1, stock2, start, end):
-    df1 = yf.download(stock1, start=start, end=end)["Adj Close"]
-    df2 = yf.download(stock2, start=start, end=end)["Adj Close"]
+    df1 = yf.download(stock1, start=start, end=end)["Close"]
+    df2 = yf.download(stock2, start=start, end=end)["Close"]
     return pd.DataFrame({stock1: df1, stock2: df2})
 
 data = load_data(stock1, stock2, start_date, end_date)
