@@ -145,4 +145,18 @@ with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
     pd.DataFrame(summary).to_excel(writer, sheet_name="Summary", index=False)
     processed = output.getvalue()
 
-st.download_button("📥 Download Ledger & Summary", data=processed, file_name="pair_trading_ledger.xlsx")
+# CSV Export for Trade Ledger
+st.download_button(
+    label="📥 Download Trade Ledger as CSV",
+    data=ledger.to_csv(index=False),
+    file_name="trade_ledger.csv",
+    mime="text/csv"
+)
+
+# CSV Export for P&L Summary
+st.download_button(
+    label="📥 Download P&L Summary as CSV",
+    data=summary_df.to_csv(index=False),
+    file_name="pnl_summary.csv",
+    mime="text/csv"
+)
