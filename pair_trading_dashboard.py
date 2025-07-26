@@ -36,6 +36,11 @@ def load_data(ticker1, ticker2, tf, interval):
 
 data = load_data(stock1, stock2, timeframe, interval)
 
+if data.empty or len(data) < 2:
+    st.error("⚠️ Not enough data for this stock/timeframe combo. Try a longer timeframe or different stocks.")
+    st.stop()
+
+
 # Calculate spread and Z-score
 data["Spread"] = data[stock1] - data[stock2]
 data["Z-Score"] = (data["Spread"] - data["Spread"].mean()) / data["Spread"].std()
