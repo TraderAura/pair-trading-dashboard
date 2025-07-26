@@ -2,134 +2,80 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
 import plotly.graph_objs as go
-from scipy import stats
-from io import BytesIO
 
 st.set_page_config(layout="wide")
-st.title("📈 Custom Pair Trading Dashboard")
+st.title("🔍 Auto-Scan Top 20 Correlated NIFTY100 Pairs (Recent Data)")
 
-# Sidebar: stock selection and settings
-stock_options = ["HDFCBANK.NS", "INFY.NS", "RELIANCE.NS", "TCS.NS", "ICICIBANK.NS"]
-stock1 = st.sidebar.selectbox("Stock 1", stock_options, index=0)
-stock2 = st.sidebar.selectbox("Stock 2", stock_options, index=1)
-interval = st.sidebar.selectbox("Time Interval", ["1d", "1h", "30m", "15m", "5m"], index=0)
-start_date = st.sidebar.date_input("Start Date", pd.to_datetime("2024-01-01"))
-end_date = st.sidebar.date_input("End Date", pd.to_datetime("2024-07-01"))
-capital = st.sidebar.number_input("Starting Capital (₹)", value=100000)
+# ----- Sidebar Controls -----
+timeframe_option = st.sidebar.selectbox(
+    "Select Timeframe for Correlation",
+    ("1 Month", "3 Months", "6 Months")
+)
 
-# Load data
-@st.cache_data
-def load_data(stock1, stock2, start, end, interval):
-    df1 = yf.download(stock1, start=start, end=end, interval=interval)["Close"]
-    df2 = yf.download(stock2, start=start, end=end, interval=interval)["Close"]
-    df = pd.concat([df1, df2], axis=1)
-    df.columns = [stock1, stock2]
-    df.dropna(inplace=True)
-    return df
+capital_per_pair = st.sidebar.number_input("Capital per Pair (₹)", value=100000)
 
-data = load_data(stock1, stock2, start_date, end_date, interval)
+# Timeframe logic
+today = datetime.today()
+if timeframe_option == "1 Month":
+    start_date = today - timedelta(days=30)
+elif timeframe_option == "3 Months":
+    start_date = today - timedelta(days=90)
+else:
+    start_date = today - timedelta(days=180)
 
-# Plot price chart
-st.subheader("📉 Price Chart")
-st.line_chart(data)
+end_date = today
 
-# Z-score and spread
-data["Spread"] = data[stock1] - data[stock2]
-data["Z-Score"] = (data["Spread"] - data["Spread"].mean()) / data["Spread"].std()
+# ----- Load NIFTY 100 symbols -----
+nifty_100 = [
+    "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS",
+    "SBIN.NS", "AXISBANK.NS", "LT.NS", "ITC.NS", "HINDUNILVR.NS", "BHARTIARTL.NS",
+    "ASIANPAINT.NS", "MARUTI.NS", "HCLTECH.NS", "ULTRACEMCO.NS", "WIPRO.NS", "SUNPHARMA.NS",
+    "NTPC.NS", "POWERGRID.NS", "NESTLEIND.NS", "BAJFINANCE.NS", "ADANIENT.NS", "ADANIPORTS.NS",
+    "CIPLA.NS", "DIVISLAB.NS", "BPCL.NS", "IOC.NS", "HINDALCO.NS", "COALINDIA.NS",
+    "TITAN.NS", "TECHM.NS", "BRITANNIA.NS", "JSWSTEEL.NS", "BAJAJFINSV.NS", "EICHERMOT.NS",
+    "GRASIM.NS", "SHREECEM.NS", "UPL.NS", "ONGC.NS", "DRREDDY.NS", "BAJAJ-AUTO.NS",
+    "HEROMOTOCO.NS", "SBILIFE.NS", "HDFCLIFE.NS", "ICICIPRULI.NS", "TATACONSUM.NS", "INDUSINDBK.NS"
+]
 
-# Trade logic
-in_position = False
-entry_index = None
-ledger = []
-current_cash = capital
+# ----- Download historical data -----
+@st.cache_data(show_spinner=True)
+def fetch_price_data(tickers, start, end):
+    data = yf.download(tickers, start=start, end=end, interval="1d")["Close"]
+    return data.dropna(axis=1, how="any")  # Remove tickers with missing data
 
-for i in range(len(data)):
-    z = data["Z-Score"].iloc[i]
-    price1 = data[stock1].iloc[i]
-    price2 = data[stock2].iloc[i]
-    timestamp = data.index[i]
+st.info("📥 Downloading recent price data...")
+price_data = fetch_price_data(nifty_100, start_date, end_date)
 
-    # Entry Condition
-    if not in_position and abs(z) > 1.5:
-        entry_index = i
-        entry_price1 = price1
-        entry_price2 = price2
-        direction = "Short 1, Long 2" if z > 1.5 else "Short 2, Long 1"
-        qty1 = qty2 = current_cash // (2 * max(entry_price1, entry_price2))
-        in_position = True
+# ----- Calculate Correlation -----
+st.success("✅ Data ready. Calculating correlations...")
 
-    # Exit Condition
-    elif in_position and abs(z) < 0.1:
-        exit_price1 = price1
-        exit_price2 = price2
-        trade_date = data.index[i]
+correlation_matrix = price_data.corr()
+pairs = []
+tickers = correlation_matrix.columns
 
-        # Determine P&L based on trade direction
-        if direction == "Short 1, Long 2":
-            pnl = (entry_price1 - exit_price1) * qty1 + (exit_price2 - entry_price2) * qty2
-        else:
-            pnl = (entry_price2 - exit_price2) * qty2 + (exit_price1 - entry_price1) * qty1
-
-        # Update cash
-        current_cash += pnl - 100  # ₹50 cost per leg
-        ledger.append({
-            "Date": trade_date.replace(tzinfo=None),
-            "Direction": direction,
-            "Entry Price 1": entry_price1,
-            "Exit Price 1": exit_price1,
-            "Entry Price 2": entry_price2,
-            "Exit Price 2": exit_price2,
-            "Qty1": qty1,
-            "Qty2": qty2,
-            "P&L": pnl,
-            "Cash After Trade": current_cash
+for i in range(len(tickers)):
+    for j in range(i+1, len(tickers)):
+        corr = correlation_matrix.iloc[i, j]
+        pairs.append({
+            "Stock 1": tickers[i],
+            "Stock 2": tickers[j],
+            "Correlation": corr
         })
 
-        in_position = False
-        entry_index = None
+# ----- Top 20 Most Correlated Pairs -----
+top_pairs = sorted(pairs, key=lambda x: abs(x["Correlation"]), reverse=True)[:20]
+df_top = pd.DataFrame(top_pairs)
+df_top["Capital Allocated (₹)"] = capital_per_pair
 
-# Plot spread + z-score
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=data.index, y=data["Spread"], name="Spread"))
-fig.add_trace(go.Scatter(x=data.index, y=data["Z-Score"], name="Z-Score", yaxis="y2"))
-fig.update_layout(
-    title="Spread and Z-Score",
-    yaxis=dict(title="Spread"),
-    yaxis2=dict(title="Z-Score", overlaying="y", side="right"),
-    legend=dict(x=0.01, y=0.99)
-)
-st.plotly_chart(fig, use_container_width=True)
+st.subheader(f"📊 Top 20 Correlated Pairs - {timeframe_option}")
+st.dataframe(df_top, use_container_width=True)
 
-# Broker-style ledger
-ledger_df = pd.DataFrame(ledger)
-
-if not ledger_df.empty:
-    st.subheader("📒 Broker-Style Ledger")
-    st.dataframe(ledger_df.style.format({
-        "Entry Price 1": "{:.2f}", "Exit Price 1": "{:.2f}",
-        "Entry Price 2": "{:.2f}", "Exit Price 2": "{:.2f}",
-        "Qty1": "{:.0f}", "Qty2": "{:.0f}",
-        "P&L": "₹{:.2f}", "Cash After Trade": "₹{:.2f}"
-    }), use_container_width=True)
-
-    st.markdown(f"### 💼 Final Capital: ₹{round(current_cash, 2):,.2f}")
-else:
-    st.info("No trades executed yet within selected time range.")
-
-# Excel download
-output = BytesIO()
-data.index = data.index.tz_localize(None)  # Remove timezone for Excel
-with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-    data.to_excel(writer, sheet_name="Price + Z")
-    if not ledger_df.empty:
-        ledger_df.to_excel(writer, sheet_name="Trade Ledger", index=False)
-    writer.close()
-    processed_data = output.getvalue()
-
+# 📥 Option to export
 st.download_button(
-    label="📥 Download Excel Report",
-    data=processed_data,
-    file_name=f"{stock1}_{stock2}_pair_trading_report.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    label="📥 Download as Excel",
+    data=df_top.to_csv(index=False),
+    file_name=f"Top_Correlated_Pairs_{timeframe_option.replace(' ', '')}.csv",
+    mime="text/csv"
 )
