@@ -2,161 +2,119 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from scipy import stats
-from io import BytesIO
 import plotly.graph_objs as go
+from io import StringIO
+from datetime import datetime
 
+# Set layout
 st.set_page_config(layout="wide")
-st.title("📈 Multi-Pair Trading Dashboard")
+st.title("📊 Live Pair Trading Dashboard")
 
-# --- Sidebar Options ---
-timeframe = st.sidebar.selectbox("Select Timeframe", ["1mo", "3mo", "6mo"])
-capital_per_pair = 100000
+# --- Sidebar Configuration ---
+stock1 = st.sidebar.selectbox("Select Stock 1", ["HDFCBANK.NS", "RELIANCE.NS", "ICICIBANK.NS"])
+stock2 = st.sidebar.selectbox("Select Stock 2", ["INFY.NS", "TCS.NS", "WIPRO.NS"])
+capital = st.sidebar.number_input("Capital per Pair (₹)", value=100000)
+timeframe = st.sidebar.selectbox("Timeframe", ["1mo", "3mo", "6mo"])
+interval = st.sidebar.selectbox("Candle Interval", ["15m", "30m", "1h", "1d"])
+refresh = st.sidebar.button("🔄 Refresh Live Data")
 
-@st.cache_data(show_spinner=False)
-def get_nifty100_tickers():
-    # Simplified for this demo — you can update with actual NIFTY 100 list
-    return [
-        "HDFCBANK.NS", "INFY.NS", "RELIANCE.NS", "ICICIBANK.NS", "TCS.NS", "KOTAKBANK.NS",
-        "ITC.NS", "LT.NS", "SBIN.NS", "HCLTECH.NS", "AXISBANK.NS", "WIPRO.NS", "SUNPHARMA.NS",
-        "TECHM.NS", "MARUTI.NS", "NESTLEIND.NS", "ULTRACEMCO.NS", "BAJFINANCE.NS", "HINDUNILVR.NS",
-        "POWERGRID.NS", "COALINDIA.NS"
-    ]
+# Initialize session state
+if "ledger" not in st.session_state:
+    st.session_state.ledger = []
+if "positions" not in st.session_state:
+    st.session_state.positions = {}
 
-@st.cache_data(show_spinner=False)
-def fetch_price_data(tickers, period="3mo"):
-    df = yf.download(tickers, period=period, interval="1d")
-    return df["Close"].dropna(how="all")
-
-# --- Step 1: Get Highly Correlated Pairs ---
-tickers = get_nifty100_tickers()
-prices = fetch_price_data(tickers, timeframe)
-corr_matrix = prices.corr().abs()
-pairs = []
-
-for i in range(len(tickers)):
-    for j in range(i + 1, len(tickers)):
-        stock1, stock2 = tickers[i], tickers[j]
-        corr = corr_matrix.loc[stock1, stock2]
-        pairs.append((stock1, stock2, corr))
-
-# Sort top 20 pairs
-pairs_sorted = sorted(pairs, key=lambda x: x[2], reverse=True)[:20]
-
-st.subheader("🔗 Top 20 Correlated Pairs")
-st.dataframe(pd.DataFrame(pairs_sorted, columns=["Stock 1", "Stock 2", "Correlation"]))
-
-# --- Step 2: Apply Pair Trading Strategy ---
-ledger_records = []
-summary = []
-
-for stock1, stock2, corr in pairs_sorted:
-    df1 = yf.download(stock1, period=timeframe, interval="1d")["Close"]
-    df2 = yf.download(stock2, period=timeframe, interval="1d")["Close"]
+# Load Data
+@st.cache_data(ttl=600)
+def load_data(ticker1, ticker2, tf, interval):
+    df1 = yf.download(ticker1, period=tf, interval=interval)["Close"]
+    df2 = yf.download(ticker2, period=tf, interval=interval)["Close"]
     df = pd.concat([df1, df2], axis=1)
-    df.columns = [stock1, stock2]
-    df.dropna(inplace=True)
-    
-    df["Spread"] = df[stock1] - df[stock2]
-    df["Z-Score"] = (df["Spread"] - df["Spread"].mean()) / df["Spread"].std()
+    df.columns = [ticker1, ticker2]
+    df = df.dropna()
+    return df
 
-    in_position = False
-    entry_price_1 = entry_price_2 = 0
-    quantity_1 = quantity_2 = 0
-    pnl = 0
-    
-    for date, row in df.iterrows():
-        z = row["Z-Score"]
+data = load_data(stock1, stock2, timeframe, interval)
 
-        if not in_position and abs(z) > 1.5:
-            # Entry
-            in_position = True
-            direction = "Long" if z < -1.5 else "Short"
+# Calculate spread and Z-score
+data["Spread"] = data[stock1] - data[stock2]
+data["Z-Score"] = (data["Spread"] - data["Spread"].mean()) / data["Spread"].std()
 
-            entry_price_1 = row[stock1]
-            entry_price_2 = row[stock2]
+# --- Trade Signal Logic ---
+z = data["Z-Score"].iloc[-1]
+price1 = data[stock1].iloc[-1]
+price2 = data[stock2].iloc[-1]
+qty1 = qty2 = int(capital // ((price1 + price2) / 2))
+signal = None
 
-            quantity_1 = capital_per_pair // entry_price_1
-            quantity_2 = capital_per_pair // entry_price_2
+if z > 1.5:
+    signal = f"Short {stock1}, Long {stock2}"
+    st.session_state.positions[(stock1, stock2)] = ("short", price1, price2, qty1, qty2)
+elif z < -1.5:
+    signal = f"Long {stock1}, Short {stock2}"
+    st.session_state.positions[(stock1, stock2)] = ("long", price1, price2, qty1, qty2)
+elif -0.1 < z < 0.1 and (stock1, stock2) in st.session_state.positions:
+    entry = st.session_state.positions.pop((stock1, stock2))
+    direction, p1_in, p2_in, q1, q2 = entry
 
-            ledger_records.append({
-                "Date": date,
-                "Stock": stock1,
-                "Side": "Buy" if z < -1.5 else "Sell",
-                "Price": entry_price_1,
-                "Qty": quantity_1,
-                "Action": "Entry",
-                "Z": z
-            })
-            ledger_records.append({
-                "Date": date,
-                "Stock": stock2,
-                "Side": "Sell" if z < -1.5 else "Buy",
-                "Price": entry_price_2,
-                "Qty": quantity_2,
-                "Action": "Entry",
-                "Z": z
-            })
+    # Calculate P&L
+    if direction == "long":
+        pnl = (price1 - p1_in) * q1 + (p2_in - price2) * q2
+    else:
+        pnl = (p2_in - price2) * q2 + (price1 - p1_in) * q1
 
-        elif in_position and abs(z) <= 0.1:
-            # Exit
-            in_position = False
-            exit_price_1 = row[stock1]
-            exit_price_2 = row[stock2]
+    st.session_state.ledger.append({
+        "timestamp": datetime.now().replace(tzinfo=None),
+        "stock1": stock1,
+        "stock2": stock2,
+        "entry_type": direction,
+        "exit_z": round(z, 2),
+        "pnl": round(pnl, 2)
+    })
 
-            # Reverse position
-            ledger_records.append({
-                "Date": date,
-                "Stock": stock1,
-                "Side": "Sell" if z < 0 else "Buy",
-                "Price": exit_price_1,
-                "Qty": quantity_1,
-                "Action": "Exit",
-                "Z": z
-            })
-            ledger_records.append({
-                "Date": date,
-                "Stock": stock2,
-                "Side": "Buy" if z < 0 else "Sell",
-                "Price": exit_price_2,
-                "Qty": quantity_2,
-                "Action": "Exit",
-                "Z": z
-            })
+# --- Display Chart ---
+st.subheader("📈 Price & Spread")
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=data.index, y=data[stock1], name=stock1))
+fig.add_trace(go.Scatter(x=data.index, y=data[stock2], name=stock2))
+fig.add_trace(go.Scatter(x=data.index, y=data["Spread"], name="Spread", yaxis="y2"))
 
-            # P&L calc
-            pnl_1 = (exit_price_1 - entry_price_1) * quantity_1 * (1 if z < 0 else -1)
-            pnl_2 = (entry_price_2 - exit_price_2) * quantity_2 * (1 if z < 0 else -1)
-            net_pnl = pnl_1 + pnl_2 - 100  # ₹50 each leg
-            pnl += net_pnl
-
-    summary.append({"Pair": f"{stock1}/{stock2}", "Correlation": round(corr, 2), "P&L": round(pnl, 2)})
-
-# --- Display Summary Table ---
-st.subheader("📊 Strategy Summary")
-st.dataframe(pd.DataFrame(summary).sort_values("P&L", ascending=False))
-
-# --- Ledger Export ---
-ledger_df = pd.DataFrame(ledger_records)
-ledger_df["Date"] = ledger_df["Date"].dt.tz_localize(None)
-output = BytesIO()
-with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-    ledger_df.to_excel(writer, sheet_name="Ledger", index=False)
-    pd.DataFrame(summary).to_excel(writer, sheet_name="Summary", index=False)
-    processed = output.getvalue()
-
-# CSV Export for Trade Ledger
-st.download_button(
-    label="📥 Download Trade Ledger as CSV",
-    data=ledger.to_csv(index=False),
-    file_name="trade_ledger.csv",
-    mime="text/csv"
+fig.update_layout(
+    yaxis=dict(title="Price"),
+    yaxis2=dict(title="Spread", overlaying="y", side="right"),
+    title="Stock Prices and Spread",
+    legend=dict(x=0.01, y=0.99)
 )
+st.plotly_chart(fig, use_container_width=True)
 
-# CSV Export for P&L Summary
-st.download_button(
-    label="📥 Download P&L Summary as CSV",
-    data=summary_df.to_csv(index=False),
-    file_name="pnl_summary.csv",
-    mime="text/csv"
-)
+# --- Signal Display ---
+if signal:
+    st.success(f"📣 Trade Signal: {signal}")
+else:
+    st.info("📡 No active trade signal.")
+
+# --- Ledger Display ---
+ledger_df = pd.DataFrame(st.session_state.ledger)
+if not ledger_df.empty:
+    st.subheader("📒 Trade Ledger")
+    st.dataframe(ledger_df, use_container_width=True)
+    
+    # P&L Summary
+    st.metric("💸 Total P&L", f"₹ {ledger_df['pnl'].sum():,.2f}")
+
+    # CSV Export
+    csv_buffer = StringIO()
+    ledger_df.to_csv(csv_buffer, index=False)
+    st.download_button(
+        label="📥 Download Ledger CSV",
+        data=csv_buffer.getvalue(),
+        file_name="pair_trading_ledger.csv",
+        mime="text/csv"
+    )
+else:
+    st.warning("🕰️ No closed trades yet.")
+
+# --- Placeholder for Live NSE Data (to be added) ---
+st.markdown("---")
+st.markdown("⚠️ **Live NSE price integration coming next...**")
+
