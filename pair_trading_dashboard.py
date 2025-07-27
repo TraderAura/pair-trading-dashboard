@@ -1,125 +1,126 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
 import numpy as np
-import plotly.graph_objs as go
-from io import StringIO
-from datetime import datetime
+from scipy import stats
+from datetime import datetime, timedelta
+import itertools
 
-# Set layout
+# --- Streamlit UI ---
 st.set_page_config(layout="wide")
-st.title("📊 Live Pair Trading Dashboard")
+st.title("📊 NIFTY 50 Pair Trading Backtest Dashboard")
 
-# --- Sidebar Configuration ---
-stock1 = st.sidebar.selectbox("Select Stock 1", ["HDFCBANK.NS", "RELIANCE.NS", "ICICIBANK.NS"])
-stock2 = st.sidebar.selectbox("Select Stock 2", ["INFY.NS", "TCS.NS", "WIPRO.NS"])
-capital = st.sidebar.number_input("Capital per Pair (₹)", value=100000)
-timeframe = st.sidebar.selectbox("Timeframe", ["1mo", "3mo", "6mo"])
-interval = st.sidebar.selectbox("Candle Interval", ["15m", "30m", "1h", "1d"])
-refresh = st.sidebar.button("🔄 Refresh Live Data")
+# Upload NIFTY50 CSV (you already did)
+nifty50_df = pd.read_csv("ind_nifty50list.csv")
+nifty50_df['YahooSymbol'] = nifty50_df['Symbol'].str.upper().str.strip() + ".NS"
+nifty_symbols = nifty50_df['YahooSymbol'].tolist()
 
-# Initialize session state
-if "ledger" not in st.session_state:
-    st.session_state.ledger = []
-if "positions" not in st.session_state:
-    st.session_state.positions = {}
+# Timeframe selection
+timeframe = st.selectbox("Select Timeframe", ["1 Month", "3 Months"])
+end_date = datetime.today()
+if timeframe == "1 Month":
+    start_date = end_date - timedelta(days=30)
+elif timeframe == "3 Months":
+    start_date = end_date - timedelta(days=90)
 
-# Load Data
-@st.cache_data(ttl=600)
-def load_data(ticker1, ticker2, tf, interval):
-    df1 = yf.download(ticker1, period=tf, interval=interval)["Close"]
-    df2 = yf.download(ticker2, period=tf, interval=interval)["Close"]
+# --- Function to fetch and merge two stock prices ---
+@st.cache_data(show_spinner=False)
+def fetch_pair_data(ticker1, ticker2, start, end):
+    df1 = yf.download(ticker1, start=start, end=end)['Close']
+    df2 = yf.download(ticker2, start=start, end=end)['Close']
     df = pd.concat([df1, df2], axis=1)
     df.columns = [ticker1, ticker2]
-    df = df.dropna()
+    df.dropna(inplace=True)
     return df
 
-data = load_data(stock1, stock2, timeframe, interval)
-
-if data.empty or len(data) < 2:
-    st.error("⚠️ Not enough data for this stock/timeframe combo. Try a longer timeframe or different stocks.")
-    st.stop()
-
-
-# Calculate spread and Z-score
-data["Spread"] = data[stock1] - data[stock2]
-data["Z-Score"] = (data["Spread"] - data["Spread"].mean()) / data["Spread"].std()
-
-# --- Trade Signal Logic ---
-z = data["Z-Score"].iloc[-1]
-price1 = data[stock1].iloc[-1]
-price2 = data[stock2].iloc[-1]
-qty1 = qty2 = int(capital // ((price1 + price2) / 2))
-signal = None
-
-if z > 1.5:
-    signal = f"Short {stock1}, Long {stock2}"
-    st.session_state.positions[(stock1, stock2)] = ("short", price1, price2, qty1, qty2)
-elif z < -1.5:
-    signal = f"Long {stock1}, Short {stock2}"
-    st.session_state.positions[(stock1, stock2)] = ("long", price1, price2, qty1, qty2)
-elif -0.1 < z < 0.1 and (stock1, stock2) in st.session_state.positions:
-    entry = st.session_state.positions.pop((stock1, stock2))
-    direction, p1_in, p2_in, q1, q2 = entry
-
-    # Calculate P&L
-    if direction == "long":
-        pnl = (price1 - p1_in) * q1 + (p2_in - price2) * q2
-    else:
-        pnl = (p2_in - price2) * q2 + (price1 - p1_in) * q1
-
-    st.session_state.ledger.append({
-        "timestamp": datetime.now().replace(tzinfo=None),
-        "stock1": stock1,
-        "stock2": stock2,
-        "entry_type": direction,
-        "exit_z": round(z, 2),
-        "pnl": round(pnl, 2)
-    })
-
-# --- Display Chart ---
-st.subheader("📈 Price & Spread")
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=data.index, y=data[stock1], name=stock1))
-fig.add_trace(go.Scatter(x=data.index, y=data[stock2], name=stock2))
-fig.add_trace(go.Scatter(x=data.index, y=data["Spread"], name="Spread", yaxis="y2"))
-
-fig.update_layout(
-    yaxis=dict(title="Price"),
-    yaxis2=dict(title="Spread", overlaying="y", side="right"),
-    title="Stock Prices and Spread",
-    legend=dict(x=0.01, y=0.99)
-)
-st.plotly_chart(fig, use_container_width=True)
-
-# --- Signal Display ---
-if signal:
-    st.success(f"📣 Trade Signal: {signal}")
-else:
-    st.info("📡 No active trade signal.")
-
-# --- Ledger Display ---
-ledger_df = pd.DataFrame(st.session_state.ledger)
-if not ledger_df.empty:
-    st.subheader("📒 Trade Ledger")
-    st.dataframe(ledger_df, use_container_width=True)
-    
-    # P&L Summary
-    st.metric("💸 Total P&L", f"₹ {ledger_df['pnl'].sum():,.2f}")
-
-    # CSV Export
-    csv_buffer = StringIO()
-    ledger_df.to_csv(csv_buffer, index=False)
-    st.download_button(
-        label="📥 Download Ledger CSV",
-        data=csv_buffer.getvalue(),
-        file_name="pair_trading_ledger.csv",
-        mime="text/csv"
+# --- Function to compute correlation matrix ---
+@st.cache_data(show_spinner=False)
+def compute_top_correlated_pairs(symbols, start, end, top_n=20):
+    price_data = yf.download(symbols, start=start, end=end)['Close']
+    price_data = price_data.dropna(axis=1)
+    corr_matrix = price_data.corr().abs()
+    upper_triangle = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    sorted_pairs = (
+        upper_triangle.stack()
+        .sort_values(ascending=False)
+        .reset_index()
+        .rename(columns={0: 'Correlation', 'level_0': 'Stock1', 'level_1': 'Stock2'})
     )
-else:
-    st.warning("🕰️ No closed trades yet.")
+    return sorted_pairs.head(top_n)
 
-# --- Placeholder for Live NSE Data (to be added) ---
-st.markdown("---")
-st.markdown("⚠️ **Live NSE price integration coming next...**")
+# --- Backtest Z-score strategy ---
+def run_backtest(df, stock1, stock2, capital=100000):
+    df['Spread'] = df[stock1] - df[stock2]
+    df['Z'] = (df['Spread'] - df['Spread'].mean()) / df['Spread'].std()
 
+    position = 0  # -1 = Short Spread, 1 = Long Spread, 0 = Neutral
+    entry_price1, entry_price2 = 0, 0
+    trades = []
+    cash = capital
+    for i in range(1, len(df)):
+        z = df['Z'].iloc[i]
+        date = df.index[i]
+
+        if position == 0:
+            if z > 1.5:
+                entry_price1 = df[stock1].iloc[i]
+                entry_price2 = df[stock2].iloc[i]
+                qty = cash // (entry_price1 + entry_price2)
+                position = -1  # Short stock1, Long stock2
+                trades.append([date, "Enter Short", stock1, entry_price1, stock2, entry_price2, qty])
+
+            elif z < -1.5:
+                entry_price1 = df[stock1].iloc[i]
+                entry_price2 = df[stock2].iloc[i]
+                qty = cash // (entry_price1 + entry_price2)
+                position = 1  # Long stock1, Short stock2
+                trades.append([date, "Enter Long", stock1, entry_price1, stock2, entry_price2, qty])
+
+        elif position == 1 and z >= 0:
+            exit_price1 = df[stock1].iloc[i]
+            exit_price2 = df[stock2].iloc[i]
+            pnl = (exit_price1 - entry_price1 - (exit_price2 - entry_price2)) * qty
+            cash += pnl
+            trades.append([date, "Exit Long", stock1, exit_price1, stock2, exit_price2, qty, pnl])
+            position = 0
+
+        elif position == -1 and z <= 0:
+            exit_price1 = df[stock1].iloc[i]
+            exit_price2 = df[stock2].iloc[i]
+            pnl = (entry_price1 - exit_price1 - (entry_price2 - exit_price2)) * qty
+            cash += pnl
+            trades.append([date, "Exit Short", stock1, exit_price1, stock2, exit_price2, qty, pnl])
+            position = 0
+
+    trades_df = pd.DataFrame(trades, columns=["Date", "Action", "Stock1", "Price1", "Stock2", "Price2", "Qty", "PnL"])
+    total_return = cash - capital
+    sharpe = total_return / (np.std(trades_df['PnL'].dropna()) + 1e-6)
+    drawdown = trades_df['PnL'].cumsum().cummax() - trades_df['PnL'].cumsum()
+    max_drawdown = drawdown.max()
+
+    return trades_df, total_return, sharpe, max_drawdown
+
+# --- Main Execution ---
+top_pairs_df = compute_top_correlated_pairs(nifty_symbols, start_date, end_date, top_n=20)
+st.subheader("Top 20 Correlated Pairs")
+st.dataframe(top_pairs_df)
+
+summary = []
+with st.spinner("🔁 Running backtests on pairs..."):
+    for idx, row in top_pairs_df.iterrows():
+        s1, s2 = row['Stock1'], row['Stock2']
+        df = fetch_pair_data(s1, s2, start_date, end_date)
+        if len(df) < 30:
+            continue
+        trades, ret, sharpe, dd = run_backtest(df, s1, s2)
+        summary.append({
+            "Pair": f"{s1}/{s2}",
+            "Total Return": round(ret, 2),
+            "Sharpe Ratio": round(sharpe, 2),
+            "Max Drawdown": round(dd, 2),
+            "Trades": len(trades) // 2
+        })
+
+summary_df = pd.DataFrame(summary)
+st.subheader("Backtest Summary")
+st.dataframe(summary_df.sort_values(by="Total Return", ascending=False), use_container_width=True)
