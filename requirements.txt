@@ -2,7 +2,9 @@ streamlit
 yfinance
 pandas
 numpy
-plotly
+matplotlib
+seaborn
+statsmodels
 scipy
+plotly
 openpyxl
-xlsxwriter
