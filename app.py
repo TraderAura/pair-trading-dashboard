@@ -13,12 +13,24 @@ capital = st.sidebar.number_input("Capital per pair (₹)", value=100000, step=1
 if st.sidebar.button("Run Backtest"):
     with st.spinner("Running backtest..."):
         results = run_backtest(timeframe, capital)
-        st.success("Backtest completed!")
+    
+    st.success("✅ Backtest completed!")
+    st.markdown("---")
 
-        for pair_result in results:
-            st.subheader(f"📉 Pair: {pair_result['pair'][0]} / {pair_result['pair'][1]}")
-            st.write("**Trade Summary:**", pair_result['summary'])
-            st.dataframe(pair_result['trades'])
+    for result in results:
+        s1, s2 = result['pair']
+        st.subheader(f"📊 {s1} / {s2} | p-value = {result['pval']:.4f}")
+        
+        # Equity Curve
+        fig = px.line(result['equity_curve'], x='Date', y='Capital', title=f"📈 Equity Curve: {s1} / {s2}")
+        st.plotly_chart(fig, use_container_width=True)
 
-            fig = px.line(pair_result['equity_curve'], x='Date', y='Capital', title='Equity Curve')
-            st.plotly_chart(fig, use_container_width=True)
+        # Trade Summary
+        st.markdown("### 🧾 Summary")
+        st.write(pd.DataFrame([result['summary']]))
+
+        # Trade Log
+        st.markdown("### 🔁 Trade Log")
+        st.dataframe(result['trades'], use_container_width=True)
+
+        st.markdown("---")
